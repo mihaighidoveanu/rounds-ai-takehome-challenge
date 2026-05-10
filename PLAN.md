@@ -142,7 +142,7 @@ SQL_HARD_RESULT_BYTES=5242880
 LLM_TIMEOUT_S=60
 CONTEXT_OVERFLOW_THRESHOLD_TOKENS=100000   # ~76% of a 131k window; triggers compression
 COMPRESSION_MODEL=                         # optional override; defaults to active agent model
-AGENT_WORKER_THREADS=4
+AGENT_WORKER_THREADS=1
 
 LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...
@@ -561,8 +561,8 @@ Notes:
 Offload long-running agent work from Bolt listener threads. `agent.run_sync` can take 15-30 s, so the event handler should acknowledge visibly and return quickly instead of occupying the Socket Mode worker.
 
 ```python
-_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("AGENT_WORKER_THREADS", "4")))
-_SEMAPHORE = threading.BoundedSemaphore(int(os.getenv("AGENT_WORKER_THREADS", "4")))
+_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("AGENT_WORKER_THREADS", "1")))
+_SEMAPHORE = threading.BoundedSemaphore(int(os.getenv("AGENT_WORKER_THREADS", "1")))
 
 def submit_agent_job(fn, *args, **kwargs):
     if not _SEMAPHORE.acquire(blocking=False):
@@ -703,7 +703,7 @@ Applied consistently at three layers; retries are surgical (transient classes on
 - Event/action handlers post an interim threaded acknowledgment immediately, then offload the full agent + render flow to `agent/executor.py`.
 - Worker jobs use one try/except around the full agent + render flow.
 - Three user-facing failure surfaces: timeout, validation, unexpected — each updates the interim message with a friendly message.
-- A bounded worker pool (`AGENT_WORKER_THREADS`, default 4) caps concurrent ReAct loops and DB load.
+- A bounded worker pool (`AGENT_WORKER_THREADS`, default 1) caps concurrent ReAct loops and DB load. The design remains concurrency-capable; the default will increase after implementing "TODO — Implement Concurrent Safety Features - gating `AGENT_WORKER_THREADS` above 1".
 - Langfuse trace marked `level="ERROR"` with a short status message on failure.
 
 ## Context Window Protection
