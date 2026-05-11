@@ -1,338 +1,257 @@
-# Starter Agent for Slack (Bolt for Python and Pydantic AI)
+# Rounds App Data Analyst
 
-A minimal starter template for building AI-powered Slack agents with [Bolt for Python](https://docs.slack.dev/tools/bolt-python/) and [Pydantic AI](https://ai.pydantic.dev/) using models from [Groq](https://groq.com), [Anthropic](https://anthropic.com), or [OpenAI](https://openai.com). Works with the [Slack MCP Server](https://github.com/slackapi/slack-mcp-server) to search messages, read channels, send messages, and manage canvases — all from within your agent.
+A Slack chatbot that answers natural-language questions about mobile app performance data for apps acquired by Rounds. It generates SQL, queries the analytics Postgres database, and renders responses as formatted tables, charts, and follow-up buttons — all inline in Slack threads.
 
-## App Overview
+## What it does
 
-The starter agent interacts with users through four entry points:
+- Answers questions like "top 5 apps by revenue last quarter" or "iOS vs Android installs since January"
+- Writes and executes SQL against the analytics database autonomously
+- Returns structured responses: prose summaries, sortable tables, line/bar/pie charts (uploaded as PNG), and suggested follow-up buttons
+- Maintains conversation context within a thread — follow-ups like "what about by platform?" just work
+- Traces every agent call to Langfuse: input, output, tool calls with their SQL, and token usage
 
-* **App Home** — Displays a welcome message with instructions on how to interact.
-* **Direct Messages** — Users message the agent directly. It responds in-thread, maintaining context across follow-ups.
-* **Channel @mentions** — Mention the agent in any channel to get a response without leaving the conversation.
-* **Assistant Panel** — Users click _Add Agent_ in Slack, select the agent, and pick from suggested prompts or type a message.
+## Architecture
 
-The template also includes one example tool (emoji reactions). Add your own tools to customize it for your use case.
+```
+User message → Slack → Bolt listener
+  → interim ":mag: Looking that up..." (background thread)
+  → Pydantic AI ReAct loop
+      → execute_sql (sqlglot validation → psycopg3 pool → Postgres)
+      → LLM composes AnalyticsResponse (table / chart / prose / buttons)
+  → composer renders blocks + uploads charts
+  → chat_update replaces interim message
+  → conversation history saved to in-memory store
+```
 
-### Slack MCP Server
+**Key files:**
 
-When connected to the [Slack MCP Server](https://github.com/slackapi/slack-mcp-server), the agent can search messages and files, read channel history and threads, send and schedule messages, and create and update canvases. When deployed with OAuth (HTTP mode), the agent automatically connects to the Slack MCP Server using the user's token.
+| File | Role |
+|---|---|
+| `agent/agent.py` | System prompt, model selection, `run_agent()` |
+| `agent/tools/execute_sql.py` | SQL validation, hard cap, retry logic |
+| `agent/response_model.py` | `AnalyticsResponse` structured output schema |
+| `formatting/composer.py` | Slack block assembly and chart uploads |
+| `observability/langfuse.py` | Langfuse tracing — spans per tool call, token counts |
+| `thread_context/store.py` | In-memory conversation history, keyed by thread |
+
+## Future actions
+
+### P1
+
+1. Langfuse v2 does not receive security updates. Migrate to v3.
+2. Fix bug where arguments to plot generation is improper. Idea: give more examples to LLM on how to generate arguments for plot.
+3. Groq offers better ZDR and lower prices than Anthropic. Investigate if open-weights models on groq are good enough for our tasks.
+4. Add concurrency protection features so we can increase the number of parallel workers.
+5. Persist conversation history. So a server restart will not refresh the conversation history.
+
+### P2
+6. Explore a common style for plots, and apply that. It should improve readability.
+7. Implement the context protection plan.
+8. Update the bot's welcome buttons to match the Data Analyst intent. They are currently leftovers from the starter template.
+
+## Prerequisites
+
+- **Python 3.11+**
+- **Docker + Docker Compose** — for the analytics database and Langfuse
+- **A Slack app** installed to your workspace (see [Slack Setup](#slack-setup) below)
+- **One AI provider key** — Anthropic (`claude-sonnet-4-6` recommended), Groq (`llama-3.3-70b-versatile`), or OpenAI (`gpt-5.4`); OpenAI not recommended because of lack of signed zero data retention agreement.
 
 ## Setup
 
-Before getting started, make sure you have a development workspace where you have permissions to install apps.
+### 1. Start the infrastructure
 
-### Developer Program
-
-Join the [Slack Developer Program](https://api.slack.com/developer-program) for exclusive access to sandbox environments for building and testing your apps, tooling, and resources created to help you build and grow.
-
-### Create the Slack app
-
-<details><summary><strong>Using Slack CLI</strong></summary>
-
-Install the latest version of the Slack CLI for your operating system:
-
-- [Slack CLI for macOS & Linux](https://docs.slack.dev/tools/slack-cli/guides/installing-the-slack-cli-for-mac-and-linux/)
-- [Slack CLI for Windows](https://docs.slack.dev/tools/slack-cli/guides/installing-the-slack-cli-for-windows/)
-
-You'll also need to log in if this is your first time using the Slack CLI.
+From the repo root (where `docker-compose.yml` lives):
 
 ```sh
-slack login
+docker compose up -d
 ```
 
-#### Initializing the project
+This starts three containers:
+
+| Container | Purpose | Port |
+|---|---|---|
+| `ai-engineer-db` | Analytics Postgres, seeded with 50 apps × 2 years of daily metrics | 5432 |
+| `langfuse-db` | Langfuse's own Postgres | 5433 |
+| `langfuse` | Langfuse web UI | 3000 |
+
+Wait until all three are healthy:
 
 ```sh
-slack create my-starter-agent --template slack-samples/bolt-python-starter-agent --subdir pydantic-ai
-cd my-starter-agent
+docker compose ps
 ```
 
-</details>
-
-<details><summary><strong>Using App Settings</strong></summary>
-
-#### Create Your Slack App
-
-1. Open [https://api.slack.com/apps/new](https://api.slack.com/apps/new) and choose "From an app manifest"
-2. Choose the workspace you want to install the application to
-3. Copy the contents of [manifest.json](./manifest.json) into the text box that says `*Paste your manifest code here*` (within the JSON tab) and click _Next_
-4. Review the configuration and click _Create_
-5. Click _Install to Workspace_ and _Allow_ on the screen that follows. You'll then be redirected to the App Configuration dashboard.
-
-#### Environment Variables
-
-Before you can run the app, you'll need to store some environment variables.
-
-1. Rename `.env.sample` to `.env`.
-2. Open your apps setting page from [this list](https://api.slack.com/apps), click _OAuth & Permissions_ in the left hand menu, then copy the _Bot User OAuth Token_ into your `.env` file under `SLACK_BOT_TOKEN`.
+### 2. Configure environment variables
 
 ```sh
-SLACK_BOT_TOKEN=YOUR_SLACK_BOT_TOKEN
+cp .env.sample .env
 ```
 
-3. Click _Basic Information_ from the left hand menu and follow the steps in the _App-Level Tokens_ section to create an app-level token with the `connections:write` scope. Copy that token into your `.env` as `SLACK_APP_TOKEN`.
+Open `.env` and fill in the required values — see the sections below for where to get each one.
 
-```sh
-SLACK_APP_TOKEN=YOUR_SLACK_APP_TOKEN
-```
-
-#### Initializing the project
-
-```sh
-git clone https://github.com/slack-samples/bolt-python-starter-agent.git my-starter-agent
-cd my-starter-agent
-```
-
-</details>
-
-### Setup your python virtual environment
+### 3. Install Python dependencies
 
 ```sh
 python3 -m venv .venv
-source .venv/bin/activate  # for Windows OS, .\.venv\Scripts\Activate instead should work
-```
-
-#### Install dependencies
-
-```sh
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Providers
+---
 
-This app supports Groq, Anthropic, and OpenAI as AI providers. Set one provider's API key and its corresponding model variable. When multiple keys are set, priority is **Groq → Anthropic → OpenAI** (controlled by the `_PROVIDERS` list in `agent/agent.py` — reorder to change precedence). The app raises an error at startup if a key is set without its matching model variable, or if no key is set at all.
+## Slack Setup
 
-### Groq Setup
+The bot runs in **Socket Mode** using a bot token and an app-level token — no public URL or ngrok needed.
 
-Uses Groq's hosted models through Pydantic AI.
+### Create the Slack app
 
-1. Create an API key from your [Groq console](https://console.groq.com/keys).
-2. Rename `.env.sample` to `.env`.
-3. Add both variables to `.env`:
+1. Go to [https://api.slack.com/apps/new](https://api.slack.com/apps/new) and choose **From an app manifest**
+2. Select your workspace
+3. Paste the contents of [`manifest.json`](./manifest.json) (JSON tab) and click **Next**
+4. Review and click **Create**, then **Install to Workspace → Allow**
 
-```sh
-GROQ_API_KEY=YOUR_GROQ_API_KEY
-GROQ_MODEL=groq:openai/gpt-oss-120b
+### Get the Bot Token
+
+1. In your app settings, go to **OAuth & Permissions**
+2. Copy the **Bot User OAuth Token** (`xoxb-...`)
+3. Add it to `.env`:
+
+```
+SLACK_BOT_TOKEN=xoxb-...
 ```
 
-### Anthropic Setup
+### Get the App-Level Token
 
-Uses Anthropic's models through Pydantic AI.
+Socket Mode requires an additional app-level token:
 
-1. Create an API key from your [Anthropic dashboard](https://console.anthropic.com/settings/keys).
-2. Rename `.env.sample` to `.env`.
-3. Add both variables to `.env`:
+1. Go to **Basic Information → App-Level Tokens**
+2. Click **Generate Token and Scopes**, give it a name, and add the `connections:write` scope
+3. Copy the token (`xapp-...`)
+4. Add it to `.env`:
 
-```sh
-ANTHROPIC_API_KEY=YOUR_ANTHROPIC_API_KEY
+```
+SLACK_APP_TOKEN=xapp-...
+```
+
+---
+
+## Langfuse Setup
+
+Langfuse traces every agent call — inputs, outputs, SQL tool calls, and token costs.
+
+1. Open [http://localhost:3000](http://localhost:3000) and create an account
+2. Create an organization and a project
+3. Go to **Project Settings → API Keys** and click **Create new API keys**
+4. Copy both keys into `.env` immediately — the secret key is shown only once:
+
+```
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=http://localhost:3000
+```
+
+> The Docker stack runs Langfuse v2 and the Python SDK is pinned to `langfuse>=2,<3` to match. Do not upgrade the SDK without also upgrading the server image.
+
+---
+
+## AI Provider Setup
+
+Set **one** provider key and its matching model variable. If multiple keys are present, priority is **Groq → Anthropic → OpenAI**.
+
+### Anthropic (recommended)
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_MODEL=anthropic:claude-sonnet-4-6
 ```
 
-### OpenAI Setup
+Get a key from [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys).
 
-Uses OpenAI's models through Pydantic AI.
+### Groq
 
-1. Create an API key from your [OpenAI dashboard](https://platform.openai.com/api-keys).
-2. Rename `.env.sample` to `.env`.
-3. Add both variables to `.env`:
-
-```sh
-OPENAI_API_KEY=YOUR_OPENAI_API_KEY
-OPENAI_MODEL=openai:gpt-5.4
+```
+GROQ_API_KEY=gsk_...
+GROQ_MODEL=groq:llama-3.3-70b-versatile
 ```
 
-## Development
+Get a key from [console.groq.com/keys](https://console.groq.com/keys).
 
-### Starting the app
+### OpenAI
 
-<details><summary><strong>Using the Slack CLI</strong></summary>
-
-#### Slack CLI
-
-```sh
-slack run
 ```
-</details>
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=openai:gpt-4.1
+```
 
-<details><summary><strong>Using the Terminal</strong></summary>
+Get a key from [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
 
-#### Terminal
+---
+
+## Running the App
 
 ```sh
 python3 app.py
 ```
 
-</details>
+You should see:
 
-<details><summary><strong>Using OAuth HTTP Server (with ngrok)</strong></summary>
-
-#### OAuth HTTP Server
-
-This mode uses an HTTP server instead of Socket Mode, which is required for OAuth-based distribution.
-
-1. Install [ngrok](https://ngrok.com/download) and start a tunnel:
-
-```sh
-ngrok http 3000
+```
+⚡️ Bolt app is running!
 ```
 
-2. Copy the `https://*.ngrok-free.app` URL from the ngrok output.
+The bot is now live and connected to Slack via Socket Mode.
 
-<details><summary><strong>Using Slack CLI</strong></summary>
+---
 
-#### Slack CLI
+## Using the Bot
 
-3. Update `manifest.json` for HTTP mode:
-   - Set `socket_mode_enabled` to `false`
-   - Replace `ngrok-free.app` with your ngrok domain (e.g. `YOUR_NGROK_SUBDOMAIN.ngrok-free.app`)
+**Direct message** — Open a DM with the bot and ask a question. The bot replies in a thread and remembers context across follow-ups within that thread.
 
-4. Create a new local dev app:
+**Channel @mention** — Invite the bot to a channel (`/invite @appdata-analyst`), then @mention it with your question. It replies in a thread to keep the channel clean.
 
-```sh
-slack install -E local
-```
+**Example queries:**
 
-5. _(Slack CLI < v4.1.0 only)_ Enable MCP for your app:
-   - Run `slack app settings` to open your app's settings
-   - Navigate to **Agents & AI Apps** in the left-side navigation
-   - Toggle **Model Context Protocol** on
+| Query | Expected response |
+|---|---|
+| `how many apps do we have?` | Prose: "50 apps" |
+| `top 5 apps by total revenue in March 2026` | Table + bar chart + follow-up buttons |
+| `chart revenue for Paint since Jan 2025` | Line chart (weekly aggregated) |
+| `iOS vs Android revenue last quarter` | Multi-series line chart |
+| `installs by platform last month` | Pie chart |
+| `which apps had the biggest UA spend last month?` | Table with delta column |
+| `which apps are doing well?` | Clarifying question + suggestion buttons |
+| _(follow-up in same thread)_ `what about by platform?` | Uses full thread context |
 
-6. Update your `.env` OAuth environment variables:
-   - Run `slack app settings` to open App Settings
-   - Copy **Client ID**, **Client Secret**, and **Signing Secret**
-   - Update `SLACK_REDIRECT_URI` in `.env` with your ngrok domain
+---
 
-```sh
-SLACK_CLIENT_ID=YOUR_CLIENT_ID
-SLACK_CLIENT_SECRET=YOUR_CLIENT_SECRET
-SLACK_SIGNING_SECRET=YOUR_SIGNING_SECRET
-SLACK_REDIRECT_URI=https://YOUR_NGROK_SUBDOMAIN.ngrok-free.app/slack/oauth_redirect
-```
+## Observability
 
-7. Start the app:
+Open [http://localhost:3000](http://localhost:3000) → **Tracing** after sending a message. Each trace shows:
 
-```sh
-slack run app_oauth.py
-```
+- The user's input
+- The final structured response
+- One span per tool call (`execute_sql`) with the SQL and returned data
+- Token counts: input, output, cache read/write
 
-8. Click the install URL printed in the terminal to install the app to your workspace via OAuth.
+---
 
-</details>
-
-<details><summary><strong>Using the Terminal</strong></summary>
-
-#### Terminal
-
-3. Create your Slack app at [api.slack.com/apps/new](https://api.slack.com/apps/new) using [`manifest.json`](./manifest.json). Before pasting the manifest, set `socket_mode_enabled` to `false` and replace `ngrok-free.app` with your ngrok domain.
-
-4. Install the app to your workspace and copy the following values into your `.env`:
-   - **Signing Secret** — from _Basic Information_
-   - **Bot User OAuth Token** — from _OAuth & Permissions_
-   - **Client ID** and **Client Secret** — from _Basic Information_
+## Linting
 
 ```sh
-SLACK_BOT_TOKEN=xoxb-YOUR_BOT_TOKEN
-SLACK_CLIENT_ID=YOUR_CLIENT_ID
-SLACK_CLIENT_SECRET=YOUR_CLIENT_SECRET
-SLACK_SIGNING_SECRET=YOUR_SIGNING_SECRET
-SLACK_REDIRECT_URI=https://YOUR_NGROK_SUBDOMAIN.ngrok-free.app/slack/oauth_redirect
-```
-
-Replace `your-subdomain` in `SLACK_REDIRECT_URI` with your ngrok subdomain.
-
-5. Start the app:
-
-```sh
-python3 app_oauth.py
-```
-
-6. Click the install URL printed in the terminal to install the app to your workspace via OAuth.
-
-</details>
-
-> **Note:** Each time ngrok restarts, it generates a new URL. You'll need to update the ngrok domain in `manifest.json`, `SLACK_REDIRECT_URI` in your `.env`, and re-install the app.
-
-</details>
-
-### Using the App
-
-Once the agent is running, there are several ways to interact:
-
-**App Home** — Open the agent in Slack and click the _Home_ tab. You'll see a welcome message with instructions on how to interact.
-
-**Direct Messages** — Open a DM with the agent. You'll see suggested prompts like _Write a Message_, _Summarize_, and _Brainstorm_ — pick one or type your own message. The agent replies in a thread. Send follow-up messages in the same thread and the agent will maintain the full conversation context.
-
-**Channel @mentions** — Invite the agent to a channel by typing `/invite @agent-name` in the message box, then @mention it followed by your message. The agent responds in a thread so the channel stays clean.
-
-**Assistant Panel** — Click _Add Agent_ in the top-right corner of Slack, select the agent from the list, then pick a suggested prompt or type a message.
-
-### Linting
-
-```sh
-# Run ruff check from root directory for linting
 ruff check
-
-# Run ruff format from root directory for code formatting
 ruff format
 ```
 
-## Project Structure
-
-### `manifest.json`
-
-`manifest.json` is a configuration for Slack apps. With a manifest, you can create an app with a pre-defined configuration, or adjust the configuration of an existing app.
-
-### `app.py`
-
-`app.py` is the entry point for the application and is the file you'll run to start the server. This project aims to keep this file as thin as possible, primarily using it as a way to route inbound requests.
-
-### `app_oauth.py`
-
-`app_oauth.py` is an alternative entry point that runs the app in HTTP mode instead of Socket Mode. This is intended for deployments that use OAuth for app distribution. See the HTTP Mode section under Development for setup instructions.
-
-### `/listeners`
-
-Every incoming request is routed to a "listener". This directory groups each listener based on the Slack Platform feature used.
-
-**`/listeners/events`** — Handles incoming events:
-
-- `app_home_opened.py` — Publishes the App Home view with a welcome message and MCP status.
-- `app_mentioned.py` — Responds to @mentions in channels.
-- `message.py` — Responds to direct messages from users.
-
-**`/listeners/actions`** — Handles interactive components:
-
-- `feedback_buttons.py` — Handles thumbs up/down feedback on agent responses.
-
-**`/listeners/views`** — Builds Block Kit views:
-
-- `app_home_builder.py` — Constructs the App Home Block Kit view.
-- `feedback_builder.py` — Creates the feedback button block attached to responses.
-
-### `/agent`
-
-The `agent.py` file defines the Pydantic AI Agent with a system prompt, personality, and tool configuration.
-
-The `deps.py` file defines the `AgentDeps` dataclass passed to the agent at runtime, providing access to the Slack client and conversation context.
-
-The `tools` directory contains one example tool (emoji reaction) that the agent can call during a conversation.
-
-### `/thread_context`
-
-The `store.py` file implements a thread-safe in-memory conversation history store, keyed by channel and thread. This enables multi-turn conversations where the agent remembers previous context within a thread.
+---
 
 ## Troubleshooting
 
-### MCP Server connection error: `HTTP error 400 (Bad Request)`
+| Symptom | Fix |
+|---|---|
+| `RuntimeError: No AI provider configured` | Set `*_API_KEY` + matching `*_MODEL` in `.env` |
+| `invalid_auth` from Slack | Check `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` are correct and the app is installed |
+| Bot doesn't respond | Check `docker compose ps` — `ai-engineer-db` must be healthy |
+| No traces in Langfuse | Verify `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` in `.env`; restart the app after editing |
+| `missing_scope` on chart upload | Re-install the app — `files:write` must be in the manifest before installation |
+| Charts appear as file attachments | Expected in developer sandboxes — charts are posted as threaded PNG files |
 
-If you see an error like:
 
-```
-Failed to connect to MCP server 'streamable_http: https://mcp.slack.com/mcp': HTTP error 400 (Bad Request)
-```
-
-This means the Slack MCP feature has not been enabled for your app. There is no manifest property for this yet, so it must be toggled on manually:
-
-1. Run `slack app settings` to open your app's settings page (or visit [api.slack.com/apps](https://api.slack.com/apps) and select your app)
-2. Navigate to **Agents & AI Apps** in the left-side navigation
-3. Toggle **Slack Model Context Protocol** on

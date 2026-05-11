@@ -1,10 +1,10 @@
 {
   "display_information": {
-    "name": "appdata-analyst"
+    "name": "Rounds Data Analyst"
   },
   "features": {
     "assistant_view": {
-      "assistant_description": "Hi, I am an agent built using Bolt for Python. I am here to help you out!",
+      "assistant_description": "Hi, I can answer questions about the apps Rounds acquired.",
       "suggested_prompts": []
     },
     "app_home": {
@@ -46,6 +46,7 @@
         "app_mentions:read",
         "channels:history",
         "chat:write",
+        "files:write",
         "groups:history",
         "im:history",
         "im:read",

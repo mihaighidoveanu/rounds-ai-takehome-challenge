@@ -1,0 +1,1 @@
+langfuse v2 does not receive security updates anymore, but I used it for speed for this home assingmnet
